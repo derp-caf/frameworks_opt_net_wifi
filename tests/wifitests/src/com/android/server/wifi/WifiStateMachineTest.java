@@ -16,6 +16,9 @@
 
 package com.android.server.wifi;
 
+import static android.net.wifi.WifiConfiguration.NetworkSelectionStatus.DISABLED_NO_INTERNET_TEMPORARY;
+import static android.net.wifi.WifiConfiguration.NetworkSelectionStatus.NETWORK_SELECTION_ENABLE;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
@@ -37,6 +40,7 @@ import android.net.ConnectivityManager;
 import android.net.DhcpResults;
 import android.net.LinkProperties;
 import android.net.MacAddress;
+import android.net.NetworkAgent;
 import android.net.NetworkCapabilities;
 import android.net.NetworkFactory;
 import android.net.NetworkInfo;
@@ -393,7 +397,7 @@ public class WifiStateMachineTest {
         when(mWifiInjector.getBuildProperties()).thenReturn(mBuildProperties);
         when(mWifiInjector.getKeyStore()).thenReturn(mock(KeyStore.class));
         when(mWifiInjector.getWifiBackupRestore()).thenReturn(mock(WifiBackupRestore.class));
-        when(mWifiInjector.makeWifiDiagnostics(anyObject())).thenReturn(mWifiDiagnostics);
+        when(mWifiInjector.getWifiDiagnostics()).thenReturn(mWifiDiagnostics);
         when(mWifiInjector.getWifiConfigManager()).thenReturn(mWifiConfigManager);
         when(mWifiInjector.getWifiScanner()).thenReturn(mWifiScanner);
         when(mWifiInjector.makeWifiConnectivityManager(any(WifiInfo.class), anyBoolean()))
@@ -903,6 +907,28 @@ public class WifiStateMachineTest {
     }
 
     /**
+     * Tests the network connection initiation sequence with the default network request pending
+     * from WifiNetworkFactory.
+     * This simulates the connect sequence using the public
+     * {@link WifiManager#enableNetwork(int, boolean)} and ensures that we invoke
+     * {@link WifiNative#connectToNetwork(WifiConfiguration)}.
+     */
+    @Test
+    public void triggerConnectFromNonSettingsApp() throws Exception {
+        loadComponentsInStaMode();
+        WifiConfiguration config = WifiConfigurationTestUtil.createOpenNetwork();
+        config.networkId = FRAMEWORK_NETWORK_ID;
+        when(mWifiPermissionsUtil.checkNetworkSettingsPermission(Process.myUid()))
+                .thenReturn(false);
+        setupAndStartConnectSequence(config);
+        verify(mWifiConfigManager).enableNetwork(eq(config.networkId), eq(true), anyInt());
+        verify(mWifiConnectivityManager, never()).setUserConnectChoice(eq(config.networkId));
+        verify(mWifiConnectivityManager).prepareForForcedConnection(eq(config.networkId));
+        verify(mWifiConfigManager).getConfiguredNetworkWithoutMasking(eq(config.networkId));
+        verify(mWifiNative).connectToNetwork(eq(WIFI_IFACE_NAME), eq(config));
+    }
+
+    /**
      * Tests the network connection initiation sequence with no network request pending from
      * from WifiNetworkFactory.
      * This simulates the connect sequence using the public
@@ -995,7 +1021,7 @@ public class WifiStateMachineTest {
         config.networkId = FRAMEWORK_NETWORK_ID + 1;
         setupAndStartConnectSequence(config);
         validateSuccessfulConnectSequence(config);
-        verify(mWifiPermissionsUtil, times(2)).checkNetworkSettingsPermission(anyInt());
+        verify(mWifiPermissionsUtil, times(4)).checkNetworkSettingsPermission(anyInt());
     }
 
     /**
@@ -1020,8 +1046,13 @@ public class WifiStateMachineTest {
         WifiConfiguration config = WifiConfigurationTestUtil.createOpenNetwork();
         config.networkId = FRAMEWORK_NETWORK_ID + 1;
         setupAndStartConnectSequence(config);
-        validateFailureConnectSequence(config);
-        verify(mWifiPermissionsUtil, times(2)).checkNetworkSettingsPermission(anyInt());
+        verify(mWifiConfigManager).enableNetwork(eq(config.networkId), eq(true), anyInt());
+        verify(mWifiConnectivityManager, never()).setUserConnectChoice(eq(config.networkId));
+        verify(mWifiConnectivityManager).prepareForForcedConnection(eq(config.networkId));
+        verify(mWifiConfigManager, never())
+                .getConfiguredNetworkWithoutMasking(eq(config.networkId));
+        verify(mWifiNative, never()).connectToNetwork(eq(WIFI_IFACE_NAME), eq(config));
+        verify(mWifiPermissionsUtil, times(4)).checkNetworkSettingsPermission(anyInt());
     }
 
     @Test
@@ -2096,7 +2127,7 @@ public class WifiStateMachineTest {
         Bundle thresholds = new Bundle();
         thresholds.putIntegerArrayList("thresholds", thresholdsArray);
         Message message = new Message();
-        message.what = android.net.NetworkAgent.CMD_SET_SIGNAL_STRENGTH_THRESHOLDS;
+        message.what = NetworkAgent.CMD_SET_SIGNAL_STRENGTH_THRESHOLDS;
         message.obj  = thresholds;
         messengerCaptor.getValue().send(message);
         mLooper.dispatchAll();
@@ -2367,5 +2398,173 @@ public class WifiStateMachineTest {
         mLooper.dispatchAll();
         verify(mIpClient).shutdown();
         verify(mIpClient).awaitShutdown();
+    }
+
+    /**
+     * Verify that WifiInfo's MAC address is updated when the state machine receives
+     * NETWORK_CONNECTION_EVENT while in ConnectedState.
+     */
+    @Test
+    public void verifyWifiInfoMacUpdatedWithNetworkConnectionWhileConnected() throws Exception {
+        when(mWifiNative.getMacAddress(WIFI_IFACE_NAME))
+                .thenReturn(TEST_LOCAL_MAC_ADDRESS.toString());
+        connect();
+        assertEquals("ConnectedState", getCurrentState().getName());
+        assertEquals(TEST_LOCAL_MAC_ADDRESS.toString(), mWsm.getWifiInfo().getMacAddress());
+
+        when(mWifiNative.getMacAddress(WIFI_IFACE_NAME))
+                .thenReturn(TEST_GLOBAL_MAC_ADDRESS.toString());
+        mWsm.sendMessage(WifiMonitor.NETWORK_CONNECTION_EVENT, 0, 0, sBSSID);
+        mLooper.dispatchAll();
+        assertEquals(TEST_GLOBAL_MAC_ADDRESS.toString(), mWsm.getWifiInfo().getMacAddress());
+    }
+
+    /**
+     * Verify that WifiInfo's MAC address is updated when the state machine receives
+     * NETWORK_CONNECTION_EVENT while in DisconnectedState.
+     */
+    @Test
+    public void verifyWifiInfoMacUpdatedWithNetworkConnectionWhileDisconnected() throws Exception {
+        when(mWifiNative.getMacAddress(WIFI_IFACE_NAME))
+                .thenReturn(TEST_LOCAL_MAC_ADDRESS.toString());
+        disconnect();
+        assertEquals("DisconnectedState", getCurrentState().getName());
+        assertEquals(TEST_LOCAL_MAC_ADDRESS.toString(), mWsm.getWifiInfo().getMacAddress());
+
+        when(mWifiNative.getMacAddress(WIFI_IFACE_NAME))
+                .thenReturn(TEST_GLOBAL_MAC_ADDRESS.toString());
+        mWsm.sendMessage(WifiMonitor.NETWORK_CONNECTION_EVENT, 0, 0, sBSSID);
+        mLooper.dispatchAll();
+        assertEquals(TEST_GLOBAL_MAC_ADDRESS.toString(), mWsm.getWifiInfo().getMacAddress());
+    }
+
+    /**
+     * Verify that we temporarily disable the network when auto-connected to a network
+     * with no internet access.
+     */
+    @Test
+    public void verifyAutoConnectedNetworkWithInternetValidationFailure() throws Exception {
+        // Simulate the first connection.
+        connect();
+        ArgumentCaptor<Messenger> messengerCaptor = ArgumentCaptor.forClass(Messenger.class);
+        verify(mConnectivityManager).registerNetworkAgent(messengerCaptor.capture(),
+                any(NetworkInfo.class), any(LinkProperties.class), any(NetworkCapabilities.class),
+                anyInt(), any(NetworkMisc.class));
+
+        WifiConfiguration currentNetwork = new WifiConfiguration();
+        currentNetwork.networkId = FRAMEWORK_NETWORK_ID;
+        currentNetwork.noInternetAccessExpected = false;
+        currentNetwork.numNoInternetAccessReports = 1;
+        when(mWifiConfigManager.getConfiguredNetwork(FRAMEWORK_NETWORK_ID))
+                .thenReturn(currentNetwork);
+        when(mWifiConfigManager.getLastSelectedNetwork()).thenReturn(FRAMEWORK_NETWORK_ID + 1);
+
+        Message message = new Message();
+        message.what = NetworkAgent.CMD_REPORT_NETWORK_STATUS;
+        message.arg1 = NetworkAgent.INVALID_NETWORK;
+        message.obj = new Bundle();
+        messengerCaptor.getValue().send(message);
+        mLooper.dispatchAll();
+
+        verify(mWifiConfigManager)
+                .incrementNetworkNoInternetAccessReports(FRAMEWORK_NETWORK_ID);
+        verify(mWifiConfigManager).updateNetworkSelectionStatus(
+                FRAMEWORK_NETWORK_ID, DISABLED_NO_INTERNET_TEMPORARY);
+    }
+
+    /**
+     * Verify that we don't temporarily disable the network when user selected to connect to a
+     * network with no internet access.
+     */
+    @Test
+    public void verifyLastSelectedNetworkWithInternetValidationFailure() throws Exception {
+        // Simulate the first connection.
+        connect();
+        ArgumentCaptor<Messenger> messengerCaptor = ArgumentCaptor.forClass(Messenger.class);
+        verify(mConnectivityManager).registerNetworkAgent(messengerCaptor.capture(),
+                any(NetworkInfo.class), any(LinkProperties.class), any(NetworkCapabilities.class),
+                anyInt(), any(NetworkMisc.class));
+
+        WifiConfiguration currentNetwork = new WifiConfiguration();
+        currentNetwork.networkId = FRAMEWORK_NETWORK_ID;
+        currentNetwork.noInternetAccessExpected = false;
+        currentNetwork.numNoInternetAccessReports = 1;
+        when(mWifiConfigManager.getConfiguredNetwork(FRAMEWORK_NETWORK_ID))
+                .thenReturn(currentNetwork);
+        when(mWifiConfigManager.getLastSelectedNetwork()).thenReturn(FRAMEWORK_NETWORK_ID);
+
+        Message message = new Message();
+        message.what = NetworkAgent.CMD_REPORT_NETWORK_STATUS;
+        message.arg1 = NetworkAgent.INVALID_NETWORK;
+        message.obj = new Bundle();
+        messengerCaptor.getValue().send(message);
+        mLooper.dispatchAll();
+
+        verify(mWifiConfigManager)
+                .incrementNetworkNoInternetAccessReports(FRAMEWORK_NETWORK_ID);
+        verify(mWifiConfigManager, never()).updateNetworkSelectionStatus(
+                FRAMEWORK_NETWORK_ID, DISABLED_NO_INTERNET_TEMPORARY);
+    }
+
+    /**
+     * Verify that we temporarily disable the network when auto-connected to a network
+     * with no internet access.
+     */
+    @Test
+    public void verifyAutoConnectedNoInternetExpectedNetworkWithInternetValidationFailure()
+            throws Exception {
+        // Simulate the first connection.
+        connect();
+        ArgumentCaptor<Messenger> messengerCaptor = ArgumentCaptor.forClass(Messenger.class);
+        verify(mConnectivityManager).registerNetworkAgent(messengerCaptor.capture(),
+                any(NetworkInfo.class), any(LinkProperties.class), any(NetworkCapabilities.class),
+                anyInt(), any(NetworkMisc.class));
+
+        WifiConfiguration currentNetwork = new WifiConfiguration();
+        currentNetwork.networkId = FRAMEWORK_NETWORK_ID;
+        currentNetwork.noInternetAccessExpected = true;
+        currentNetwork.numNoInternetAccessReports = 1;
+        when(mWifiConfigManager.getConfiguredNetwork(FRAMEWORK_NETWORK_ID))
+                .thenReturn(currentNetwork);
+        when(mWifiConfigManager.getLastSelectedNetwork()).thenReturn(FRAMEWORK_NETWORK_ID + 1);
+
+        Message message = new Message();
+        message.what = NetworkAgent.CMD_REPORT_NETWORK_STATUS;
+        message.arg1 = NetworkAgent.INVALID_NETWORK;
+        message.obj = new Bundle();
+        messengerCaptor.getValue().send(message);
+        mLooper.dispatchAll();
+
+        verify(mWifiConfigManager)
+                .incrementNetworkNoInternetAccessReports(FRAMEWORK_NETWORK_ID);
+        verify(mWifiConfigManager, never()).updateNetworkSelectionStatus(
+                FRAMEWORK_NETWORK_ID, DISABLED_NO_INTERNET_TEMPORARY);
+    }
+
+    /**
+     * Verify that we enable the network when we detect validated internet access.
+     */
+    @Test
+    public void verifyNetworkSelectionEnableOnInternetValidation() throws Exception {
+        // Simulate the first connection.
+        connect();
+        ArgumentCaptor<Messenger> messengerCaptor = ArgumentCaptor.forClass(Messenger.class);
+        verify(mConnectivityManager).registerNetworkAgent(messengerCaptor.capture(),
+                any(NetworkInfo.class), any(LinkProperties.class), any(NetworkCapabilities.class),
+                anyInt(), any(NetworkMisc.class));
+
+        when(mWifiConfigManager.getLastSelectedNetwork()).thenReturn(FRAMEWORK_NETWORK_ID + 1);
+
+        Message message = new Message();
+        message.what = NetworkAgent.CMD_REPORT_NETWORK_STATUS;
+        message.arg1 = NetworkAgent.VALID_NETWORK;
+        message.obj = new Bundle();
+        messengerCaptor.getValue().send(message);
+        mLooper.dispatchAll();
+
+        verify(mWifiConfigManager)
+                .setNetworkValidatedInternetAccess(FRAMEWORK_NETWORK_ID, true);
+        verify(mWifiConfigManager).updateNetworkSelectionStatus(
+                FRAMEWORK_NETWORK_ID, NETWORK_SELECTION_ENABLE);
     }
 }

@@ -132,13 +132,12 @@ public class WifiInjector {
     private HalDeviceManager mHalDeviceManager;
     private final IBatteryStats mBatteryStats;
     private final WifiStateTracker mWifiStateTracker;
-    private final Runtime mJavaRuntime;
     private final SelfRecovery mSelfRecovery;
     private final WakeupController mWakeupController;
     private final INetworkManagementService mNwManagementService;
     private final ScanRequestProxy mScanRequestProxy;
-    private BaseWifiDiagnostics mWifiDiagnostics;
     private final SarManager mSarManager;
+    private final BaseWifiDiagnostics mWifiDiagnostics;
 
     private final boolean mUseRealLogger;
 
@@ -231,6 +230,7 @@ public class WifiInjector {
         mConnectivityLocalLog = new LocalLog(ActivityManager.isLowRamDeviceStatic() ? 256 : 512);
         mScoringParams = new ScoringParams(mContext, mFrameworkFacade,
                 new Handler(wifiStateMachineLooper));
+        mWifiMetrics.setScoringParams(mScoringParams);
         mWifiNetworkSelector = new WifiNetworkSelector(mContext, mScoringParams,
                 mWifiConfigManager, mClock,
                 mConnectivityLocalLog);
@@ -252,16 +252,20 @@ public class WifiInjector {
                 (ActivityManager) mContext.getSystemService(Context.ACTIVITY_SERVICE),
                 this, mWifiConfigManager,
                 mWifiPermissionsUtil, mWifiMetrics, mClock);
-        // mWifiStateMachine has an implicit dependency on mJavaRuntime due to WifiDiagnostics.
-        mJavaRuntime = Runtime.getRuntime();
         mSarManager = new SarManager(mContext, makeTelephonyManager(), wifiStateMachineLooper,
                 mWifiNative);
+        if (mUseRealLogger) {
+            mWifiDiagnostics = new WifiDiagnostics(
+                    mContext, this, mWifiNative, mBuildProperties,
+                    new LastMileLogger(this));
+        } else {
+            mWifiDiagnostics = new BaseWifiDiagnostics(mWifiNative);
+        }
         mWifiStateMachine = new WifiStateMachine(mContext, mFrameworkFacade,
                 wifiStateMachineLooper, UserManager.get(mContext),
                 this, mBackupManagerProxy, mCountryCode, mWifiNative,
                 new WrongPasswordNotifier(mContext, mFrameworkFacade),
                 mSarManager);
-        IBinder b = mFrameworkFacade.getService(Context.NETWORKMANAGEMENT_SERVICE);
         mWifiStateMachinePrime = new WifiStateMachinePrime(this, mContext, wifiStateMachineLooper,
                 mWifiNative, new DefaultModeManager(mContext, wifiStateMachineLooper),
                 mBatteryStats);
@@ -284,7 +288,6 @@ public class WifiInjector {
                 new WakeupLock(mWifiConfigManager, mWifiMetrics.getWakeupMetrics(), mClock),
                 WakeupEvaluator.fromContext(mContext), wakeupOnboarding, mWifiConfigManager,
                 mWifiConfigStore, mWifiMetrics.getWakeupMetrics(), this, mFrameworkFacade);
-        mWifiDiagnostics = this.makeWifiDiagnostics(mWifiNative);
         if (mWifiStateMachine != null)
             mWifiStateMachine.setWifiDiagnostics(mWifiDiagnostics);
         mLockManager = new WifiLockManager(mContext, BatteryStatsService.getService());
@@ -497,14 +500,8 @@ public class WifiInjector {
         return new LogcatLog(tag);
     }
 
-    public BaseWifiDiagnostics makeWifiDiagnostics(WifiNative wifiNative) {
-        if (mUseRealLogger) {
-            return new WifiDiagnostics(
-                    mContext, this, mWifiStateMachine, wifiNative, mBuildProperties,
-                    new LastMileLogger(this));
-        } else {
-            return new BaseWifiDiagnostics(wifiNative);
-        }
+    public BaseWifiDiagnostics getWifiDiagnostics() {
+        return mWifiDiagnostics;
     }
 
     /**
@@ -582,10 +579,6 @@ public class WifiInjector {
         return mHalDeviceManager;
     }
 
-    public Runtime getJavaRuntime() {
-        return mJavaRuntime;
-    }
-
     public WifiNative getWifiNative() {
         return mWifiNative;
     }
@@ -612,6 +605,10 @@ public class WifiInjector {
 
     public ScanRequestProxy getScanRequestProxy() {
         return mScanRequestProxy;
+    }
+
+    public Runtime getJavaRuntime() {
+        return Runtime.getRuntime();
     }
 
     public ActivityManagerService getActivityManagerService() {
