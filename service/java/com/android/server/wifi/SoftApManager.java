@@ -78,6 +78,7 @@ public class SoftApManager implements ActiveModeManager {
     private final WifiManager.SoftApCallback mCallback;
 
     private String mApInterfaceName;
+    private String mDataInterfaceName;
     private boolean mIfaceIsUp;
 
     private final WifiApConfigStore mWifiApConfigStore;
@@ -228,7 +229,7 @@ public class SoftApManager implements ActiveModeManager {
             intent.putExtra(WifiManager.EXTRA_WIFI_AP_FAILURE_REASON, reason);
         }
 
-        intent.putExtra(WifiManager.EXTRA_WIFI_AP_INTERFACE_NAME, mApInterfaceName);
+        intent.putExtra(WifiManager.EXTRA_WIFI_AP_INTERFACE_NAME, mDataInterfaceName);
         intent.putExtra(WifiManager.EXTRA_WIFI_AP_MODE, mMode);
         mContext.sendStickyBroadcastAsUser(intent, UserHandle.ALL);
     }
@@ -311,21 +312,21 @@ public class SoftApManager implements ActiveModeManager {
         private final InterfaceCallback mWifiNativeInterfaceCallback = new InterfaceCallback() {
             @Override
             public void onDestroyed(String ifaceName) {
-                if (mApInterfaceName != null && mApInterfaceName.equals(ifaceName)) {
+                if (mDataInterfaceName != null && mDataInterfaceName.equals(ifaceName)) {
                     sendMessage(CMD_INTERFACE_DESTROYED);
                 }
             }
 
             @Override
             public void onUp(String ifaceName) {
-                if (mApInterfaceName != null && mApInterfaceName.equals(ifaceName)) {
+                if (mDataInterfaceName != null && mDataInterfaceName.equals(ifaceName)) {
                     sendMessage(CMD_INTERFACE_STATUS_CHANGED, 1);
                 }
             }
 
             @Override
             public void onDown(String ifaceName) {
-                if (mApInterfaceName != null && mApInterfaceName.equals(ifaceName)) {
+                if (mDataInterfaceName != null && mDataInterfaceName.equals(ifaceName)) {
                     sendMessage(CMD_INTERFACE_STATUS_CHANGED, 0);
                 }
             }
@@ -414,6 +415,7 @@ public class SoftApManager implements ActiveModeManager {
             @Override
             public void enter() {
                 mApInterfaceName = null;
+                mDataInterfaceName = null;
                 mIfaceIsUp = false;
             }
 
@@ -441,6 +443,10 @@ public class SoftApManager implements ActiveModeManager {
                             mWifiMetrics.incrementSoftApStartResult(
                                     false, WifiManager.SAP_START_FAILURE_GENERAL);
                             break;
+                        }
+                        mDataInterfaceName = mWifiNative.getFstDataInterfaceName();
+                        if (TextUtils.isEmpty(mDataInterfaceName)) {
+                            mDataInterfaceName = mApInterfaceName;
                         }
                         updateApState(WifiManager.WIFI_AP_STATE_ENABLING,
                                 WifiManager.WIFI_AP_STATE_DISABLED, 0);
@@ -597,6 +603,7 @@ public class SoftApManager implements ActiveModeManager {
                     mWifiMetrics.incrementSoftApStartResult(true, 0);
                     if (mCallback != null) {
                         mCallback.onNumClientsChanged(mNumAssociatedStations);
+                        mCallback.onStaConnected("", mQCNumAssociatedStations);
                     }
                 } else {
                     // the interface was up, but goes down
@@ -608,7 +615,7 @@ public class SoftApManager implements ActiveModeManager {
             @Override
             public void enter() {
                 mIfaceIsUp = false;
-                onUpChanged(mWifiNative.isInterfaceUp(mApInterfaceName));
+                onUpChanged(mWifiNative.isInterfaceUp(mDataInterfaceName));
 
                 mTimeoutDelay = getConfigSoftApTimeoutDelay();
                 Handler handler = mStateMachine.getHandler();
@@ -622,6 +629,7 @@ public class SoftApManager implements ActiveModeManager {
                 }
                 Log.d(TAG, "Resetting num stations on start");
                 mNumAssociatedStations = 0;
+                mQCNumAssociatedStations = 0;
                 scheduleTimeoutMessage();
             }
 
@@ -635,6 +643,7 @@ public class SoftApManager implements ActiveModeManager {
                 }
                 Log.d(TAG, "Resetting num stations on stop");
                 mNumAssociatedStations = 0;
+                mQCNumAssociatedStations = 0;
                 cancelTimeoutMessage();
                 // Need this here since we are exiting |Started| state and won't handle any
                 // future CMD_INTERFACE_STATUS_CHANGED events after this point
@@ -642,6 +651,7 @@ public class SoftApManager implements ActiveModeManager {
                 updateApState(WifiManager.WIFI_AP_STATE_DISABLED,
                         WifiManager.WIFI_AP_STATE_DISABLING, 0);
                 mApInterfaceName = null;
+                mDataInterfaceName = null;
                 mIfaceIsUp = false;
                 mStateMachine.quitNow();
             }
