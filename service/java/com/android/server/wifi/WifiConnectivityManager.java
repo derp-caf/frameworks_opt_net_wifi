@@ -18,6 +18,7 @@ package com.android.server.wifi;
 
 import static com.android.internal.util.Preconditions.checkNotNull;
 import static com.android.server.wifi.ClientModeImpl.WIFI_WORK_SOURCE;
+import static com.android.server.wifi.WifiSettingsConfigStore.WIFI_WHITELIST_ROAMING_ENABLED;
 
 import android.annotation.NonNull;
 import android.app.AlarmManager;
@@ -317,8 +318,9 @@ public class WifiConnectivityManager {
 
         localLog(listenerName + " onResults: start network selection");
 
+        List<ScanDetail> filteredScans = mStateMachine.qtiGetFilteredScan(scanDetails);
         List<WifiCandidates.Candidate> candidates = mNetworkSelector.getCandidatesFromScan(
-                scanDetails, bssidBlocklist, mWifiInfo, mStateMachine.isConnected(),
+                filteredScans, bssidBlocklist, mWifiInfo, mStateMachine.isConnected(),
                 mStateMachine.isDisconnected(), mUntrustedConnectionAllowed);
         mLatestCandidates = candidates;
         mLatestCandidatesTimestampMs = mClock.getElapsedSinceBootMillis();
@@ -922,7 +924,8 @@ public class WifiConnectivityManager {
         if (currentConnectedNetwork != null
                 && (currentConnectedNetwork.networkId == candidate.networkId
                 //TODO(b/36788683): re-enable linked configuration check
-                /* || currentConnectedNetwork.isLinked(candidate) */)) {
+                 || (mWifiInjector.getSettingsConfigStore().get(WIFI_WHITELIST_ROAMING_ENABLED)
+                      && currentConnectedNetwork.isLinked(candidate)))) {
             // Framework initiates roaming only if firmware doesn't support
             // {@link android.net.wifi.WifiManager#WIFI_FEATURE_CONTROL_ROAMING}.
             if (mConnectivityHelper.isFirmwareRoamingSupported()) {
@@ -938,7 +941,7 @@ public class WifiConnectivityManager {
             // Framework specifies the connection target BSSID if firmware doesn't support
             // {@link android.net.wifi.WifiManager#WIFI_FEATURE_CONTROL_ROAMING} or the
             // candidate configuration contains a specified BSSID.
-            if (mConnectivityHelper.isFirmwareRoamingSupported() && (candidate.BSSID == null
+            if (!mStateMachine.isActiveDualMode() && mConnectivityHelper.isFirmwareRoamingSupported() && (candidate.BSSID == null
                       || candidate.BSSID.equals(ClientModeImpl.SUPPLICANT_BSSID_ANY))) {
                 targetBssid = ClientModeImpl.SUPPLICANT_BSSID_ANY;
                 localLog("connectToNetwork: Connect to " + candidate.SSID + ":" + targetBssid

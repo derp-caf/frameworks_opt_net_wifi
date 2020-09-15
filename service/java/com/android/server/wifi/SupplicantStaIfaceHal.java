@@ -130,6 +130,8 @@ public class SupplicantStaIfaceHal {
             new HashMap<>();
     private HashMap<String, SupplicantStaNetworkHal> mCurrentNetworkRemoteHandles = new HashMap<>();
     private HashMap<String, WifiConfiguration> mCurrentNetworkLocalConfigs = new HashMap<>();
+    private HashMap<String, ArrayList<Pair<SupplicantStaNetworkHal, WifiConfiguration>>>
+            mLinkedNetworkLocalAndRemoteConfigs = new HashMap<>();
     @VisibleForTesting
     HashMap<Integer, PmkCacheStoreData> mPmkCacheEntries = new HashMap<>();
     private SupplicantDeathEventHandler mDeathEventHandler;
@@ -842,6 +844,7 @@ public class SupplicantStaIfaceHal {
             mISupplicantVendorStaIfaces.clear();
             mCurrentNetworkLocalConfigs.clear();
             mCurrentNetworkRemoteHandles.clear();
+            mLinkedNetworkLocalAndRemoteConfigs.clear();
         }
     }
 
@@ -1253,6 +1256,7 @@ public class SupplicantStaIfaceHal {
             } else {
                 mCurrentNetworkRemoteHandles.remove(ifaceName);
                 mCurrentNetworkLocalConfigs.remove(ifaceName);
+                mLinkedNetworkLocalAndRemoteConfigs.remove(ifaceName);
                 if (!removeAllNetworks(ifaceName)) {
                     loge("Failed to remove existing networks");
                     return false;
@@ -1382,6 +1386,7 @@ public class SupplicantStaIfaceHal {
             // current network on receiving disconnection event from supplicant (b/32898136).
             mCurrentNetworkRemoteHandles.remove(ifaceName);
             mCurrentNetworkLocalConfigs.remove(ifaceName);
+            mLinkedNetworkLocalAndRemoteConfigs.remove(ifaceName);
             return true;
         }
     }
@@ -4156,6 +4161,153 @@ public class SupplicantStaIfaceHal {
                 handleRemoteException(e, methodStr);
             }
             return STATUS.value;
+        }
+    }
+
+    protected vendor.qti.hardware.wifi.supplicant.V2_2.ISupplicantVendorStaIface
+        getSupplicantVendorStaIfaceV2_2Mockable(ISupplicantVendorStaIface vendorIfaceV2_0) {
+        if (vendorIfaceV2_0 == null) return null;
+        return vendor.qti.hardware.wifi.supplicant.V2_2.ISupplicantVendorStaIface.castFrom(
+                vendorIfaceV2_0);
+    }
+
+    /**
+     * run Driver command
+     *
+     * @param ifaceName Interface Name
+     * @param command Driver Command
+     */
+    public String doDriverCmd(String ifaceName, String command)
+    {
+        synchronized (mLock) {
+            final String methodStr = "doDriverCmd";
+            final Mutable<String> reply = new Mutable<>();
+
+            reply.value = "";
+            ISupplicantVendorStaIface vendorIfaceV2_0 = getVendorStaIface(ifaceName);
+            if (vendorIfaceV2_0 == null) {
+                Log.e(TAG, "Can't call " + methodStr + ", ISupplicantVendorStaIface is null");
+                return null;
+            }
+
+            vendor.qti.hardware.wifi.supplicant.V2_2.ISupplicantVendorStaIface vendorIfaceV2_2;
+            vendorIfaceV2_2 = getSupplicantVendorStaIfaceV2_2Mockable(vendorIfaceV2_0);
+            if (vendorIfaceV2_2 == null) {
+                Log.e(TAG, "Can't call " + methodStr + ", V2_2.ISupplicantVendorStaIface is null");
+                return null;
+            }
+
+            try {
+                vendorIfaceV2_2.doDriverCmd(command,
+                        (SupplicantStatus status, String rply) -> {
+                        if(checkVendorStatusAndLogFailure(status, methodStr)) {
+                            reply.value = rply;
+                     }
+                });
+            } catch (RemoteException e) {
+                handleRemoteException(e, methodStr);
+            }
+            return reply.value;
+         }
+    }
+
+    protected int getCurrentNetworkRemoteId(@NonNull String ifaceName) {
+        synchronized (mLock) {
+            SupplicantStaNetworkHal networkHal = getCurrentNetworkRemoteHandle(ifaceName);
+            if (networkHal == null) {
+                return WifiConfiguration.INVALID_NETWORK_ID;
+            }
+            return networkHal.getNetworkId();
+        }
+    }
+
+    protected void updateCurrentNetworkHandles(@NonNull String ifaceName,
+            @NonNull Pair<SupplicantStaNetworkHal, WifiConfiguration> networkHandles) {
+        mCurrentNetworkRemoteHandles.put(ifaceName, networkHandles.first);
+        mCurrentNetworkLocalConfigs.put(ifaceName, networkHandles.second);
+    }
+
+    protected ArrayList<Pair<SupplicantStaNetworkHal, WifiConfiguration>>
+            getLinkedNetworksHandles(@NonNull String ifaceName) {
+        return mLinkedNetworkLocalAndRemoteConfigs.get(ifaceName);
+    }
+
+    public boolean updateLinkedNetworks(@NonNull String ifaceName, int networkId,
+                           HashMap<String, WifiConfiguration> linkedConfigurations) {
+        synchronized (mLock) {
+            WifiConfiguration currentConfig = getCurrentNetworkLocalConfig(ifaceName);
+            SupplicantStaNetworkHal currentHandle = getCurrentNetworkRemoteHandle(ifaceName);
+
+            if (currentConfig == null || currentHandle == null) {
+                Log.e(TAG, "current network not configured yet.");
+                return false;
+            }
+
+            if (currentConfig.networkId != networkId) {
+                Log.e(TAG, "current network id is not matching");
+                return false;
+            }
+
+            if (!currentHandle.getId()) {
+                Log.e(TAG, "current network getId failed");
+                return false;
+            }
+
+            if (!removeLinkedNetworks(ifaceName, currentHandle.getNetworkId())) {
+                Log.e(TAG, "couldn't remove existing linked networks");
+                return false;
+            }
+
+            mLinkedNetworkLocalAndRemoteConfigs.remove(ifaceName);
+
+            if (linkedConfigurations == null || linkedConfigurations.size() == 0) {
+                Log.i(TAG, "cleared linked networks");
+                return true;
+            }
+
+            ArrayList<Pair<SupplicantStaNetworkHal, WifiConfiguration>> linkedNetworkHandles
+                = new ArrayList<Pair<SupplicantStaNetworkHal, WifiConfiguration>>();
+
+            linkedNetworkHandles.add(new Pair(mCurrentNetworkRemoteHandles.get(ifaceName),
+                                              mCurrentNetworkLocalConfigs.get(ifaceName)));
+            for (String linkedNetwork : linkedConfigurations.keySet()) {
+                Log.i(TAG, "add linked network: " + linkedNetwork);
+                Pair<SupplicantStaNetworkHal, WifiConfiguration> pair =
+                        addNetworkAndSaveConfig(ifaceName, linkedConfigurations.get(linkedNetwork));
+                if (pair == null) {
+                    Log.e(TAG, "failed to add/save linked network: " + linkedNetwork);
+                    return false;
+                }
+                pair.first.enable(true);
+                linkedNetworkHandles.add(pair);
+            }
+
+            mLinkedNetworkLocalAndRemoteConfigs.put(ifaceName, linkedNetworkHandles);
+
+            return true;
+        }
+    }
+
+    /**
+     * Remove linked networks from supplicant
+     *
+     * @param ifaceName Name of the interface.
+     */
+    private boolean removeLinkedNetworks(@NonNull String ifaceName, int currentNetworkId) {
+        synchronized (mLock) {
+            ArrayList<Integer> networks = listNetworks(ifaceName);
+            if (networks == null) {
+                Log.e(TAG, "removeLinkedNetworks failed, got null networks");
+                return false;
+            }
+            for (int id : networks) {
+                if (currentNetworkId == id) continue;
+                if (!removeNetwork(ifaceName, id)) {
+                    Log.e(TAG, "removeLinkedNetworks failed to remove network: " + id);
+                    return false;
+                }
+            }
+            return true;
         }
     }
 }
